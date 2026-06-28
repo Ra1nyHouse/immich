@@ -1,6 +1,8 @@
 *.zip
 *.onnx
 *.rknn
+# 例外：仓库内置的 RKNN 模型文件需要纳入版本控制
+!models/rknn/**/*.rknn
 *.npy
 *_attr__value
 *.weight
