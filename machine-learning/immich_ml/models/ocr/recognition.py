@@ -54,10 +54,21 @@ class TextRecognizer(InferenceModel):
 
     def _download(self) -> None:
         if self.model_format == ModelFormat.RKNN:
-            log.warning(
-                f"OCR RKNN 模型需要手动转换。请运行: "
-                f"uv run --with 'rknn-toolkit2>=2.3.0,<3' --with 'numpy<2' --python 3.12 "
-                f"scripts/convert_ocr_rknn.py --output-dir {self.model_dir}"
+            # 从 fork 仓库的 GitHub raw 地址自动下载预转换的 .rknn 模型
+            # 仓库：https://github.com/Ra1nyHouse/immich (feature/rknn-orc 分支)
+            # 模型由 scripts/convert_ocr_rknn.py 转换，FP16，rec 输入 48x320
+            rknn_url = (
+                "https://raw.githubusercontent.com/Ra1nyHouse/immich/feature/rknn-orc/"
+                f"machine-learning/models/rknn/ocr/{self.model_name}/recognition/model.rknn"
+            )
+            log.info(f"Downloading OCR RKNN recognition model from {rknn_url}")
+            DownloadFile.run(
+                DownloadFileInput(
+                    file_url=rknn_url,
+                    sha256=None,  # GitHub raw 不提供 sha256，跳过校验
+                    save_path=self.model_path,
+                    logger=log,
+                )
             )
             return
         model_info = InferSession.get_model_url(
