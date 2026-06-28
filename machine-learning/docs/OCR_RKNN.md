@@ -378,3 +378,195 @@ ls -la /tmp/ocr_crop_*.png            # crop 后的文本区域
 - [PPOCR-Rec python demo (ppocr_rec.py)](https://github.com/airockchip/rknn_model_zoo/blob/main/examples/PPOCR/PPOCR-Rec/python/ppocr_rec.py)
 - [RKNN-Toolkit2 文档](https://github.com/airockchip/rknn-toolkit2)
 - [RapidOCR 项目](https://github.com/RapidAI/RapidOCR)
+
+---
+
+## 7. 本地构建镜像
+
+OCR RKNN 改动已纳入 Dockerfile 的 `rknn` 构建路径，**无需修改 Dockerfile**，直接在 RK3588 主机上构建即可。
+
+### 7.1 前置条件
+
+| 条件 | 说明 |
+|---|---|
+| 架构 | 必须在 **aarch64（ARM64）** 主机构建（RK3588 本机即可） |
+| Docker | 已安装 Docker（`docker --version`） |
+| 磁盘空间 | 至少 5GB 可用空间（构建产物 + 镜像层） |
+| 网络 | 能访问 PyPI（安装 Python 依赖）和 GitHub raw（运行时下载模型） |
+
+> **不要在 x86 机器上构建**：`rknn-toolkit-lite2` 只发布 `manylinux_2_17_aarch64` wheel，x86 上 `uv sync --extra rknn` 会失败。
+
+### 7.2 构建命令
+
+在仓库根目录（`immich/`）执行：
+
+```bash
+cd /path/to/immich
+
+# 构建 RKNN 版本镜像（推荐）
+docker build \
+    --platform linux/arm64 \
+    --build-arg DEVICE=rknn \
+    -t immich-machine-learning:rknn-local \
+    -f machine-learning/Dockerfile \
+    machine-learning/
+```
+
+参数说明：
+- `--platform linux/arm64`：明确指定 ARM64 架构
+- `--build-arg DEVICE=rknn`：选择 RKNN 构建路径（默认是 `cpu`）
+- `-f machine-learning/Dockerfile`：指定 Dockerfile 路径
+- `machine-learning/`：构建上下文（Dockerfile 中 `COPY` 的相对路径基准）
+
+构建过程约 10-15 分钟，主要耗时在 `uv sync` 安装依赖和 `apt-get install` 系统库。
+
+### 7.3 同时构建 CPU 和 RKNN 镜像（可选）
+
+如果需要同时保留 CPU 和 RKNN 两个版本镜像：
+
+```bash
+# CPU 版本（可在 x86 或 aarch64 构建）
+docker build \
+    --build-arg DEVICE=cpu \
+    -t immich-machine-learning:cpu-local \
+    -f machine-learning/Dockerfile \
+    machine-learning/
+
+# RKNN 版本（必须在 aarch64 构建）
+docker build \
+    --build-arg DEVICE=rknn \
+    -t immich-machine-learning:rknn-local \
+    -f machine-learning/Dockerfile \
+    machine-learning/
+```
+
+### 7.4 验证镜像
+
+```bash
+# 查看镜像大小（通常 RKNN 镜像约 800MB-1GB）
+docker images immich-machine-learning:rknn-local
+
+# 快速验证镜像能启动（不依赖 NPU 驱动）
+docker run --rm --entrypoint python immich-machine-learning:rknn-local -c "
+from immich_ml.sessions.rknn import is_available
+print(f'RKNN available in container: {is_available}')
+import rknnlite
+print(f'rknnlite version: {rknnlite.__version__}')
+"
+```
+
+### 7.5 运行容器
+
+```bash
+docker run -d \
+    --name immich-ml-rknn \
+    --restart unless-stopped \
+    -p 3003:3003 \
+    -v ~/.cache/immich_ml:/cache \
+    -e MACHINE_LEARNING_RKNN=true \
+    immich-machine-learning:rknn-local
+```
+
+关键参数说明：
+
+| 参数 | 作用 |
+|---|---|
+| `-p 3003:3003` | 映射服务端口 |
+| `-v ~/.cache/immich_ml:/cache` | 挂载模型缓存目录（避免每次启动重新下载模型） |
+| `--device /dev/dri` | （可选）挂载 GPU 设备，某些 RK3588 内核需要 |
+| `-e MACHINE_LEARNING_RKNN=true` | 显式启用 RKNN（不设也会自动检测，但显式更可靠） |
+
+### 7.6 关于模型的说明
+
+**镜像内不预置 .rknn 模型文件**，模型在首次推理时自动下载：
+
+1. 容器启动后，首次收到 OCR 请求时触发模型加载
+2. `TextDetector._download()` 检测到 `model.rknn` 不存在，从 GitHub raw 下载
+3. 下载地址：`https://raw.githubusercontent.com/Ra1nyHouse/immich/feature/rknn-orc/machine-learning/models/rknn/ocr/PP-OCRv5_mobile/{detection,recognition}/model.rknn`
+4. 下载后缓存在 `/cache/ocr/PP-OCRv5_mobile/{detection,recognition}/model.rknn`
+5. 后续启动直接读缓存，不再下载
+
+**如果容器内无法访问 GitHub raw**（网络受限环境）：
+
+```bash
+# 方案 A：挂载宿主机已下载的模型
+docker run -d \
+    -v ~/.cache/immich_ml:/cache \
+    ... 其他参数
+
+# 方案 B：手动复制模型到容器
+docker cp ~/.cache/immich_ml/ocr/PP-OCRv5_mobile/detection/model.rknn immich-ml-rknn:/cache/ocr/PP-OCRv5_mobile/detection/model.rknn
+docker cp ~/.cache/immich_ml/ocr/PP-OCRv5_mobile/recognition/model.rknn immich-ml-rknn:/cache/ocr/PP-OCRv5_mobile/recognition/model.rknn
+```
+
+### 7.7 NPU 驱动要求
+
+容器内运行 RKNN 推理需要宿主机满足：
+
+1. **`rknpu` 内核模块已加载**（`lsmod | grep rknpu` 应有输出）
+2. **`/dev/dri` 设备存在**（`ls /dev/dri` 应有 `renderD128` 等）
+3. **`librknnrt.so` 已安装**（Dockerfile 已自动下载到 `/usr/lib/librknnrt.so`）
+
+如果启动时日志出现 `failed to open rknpu module`，在宿主机执行：
+
+```bash
+sudo modprobe rknpu
+# 或重启宿主机
+```
+
+### 7.8 测试容器内的 OCR RKNN
+
+```bash
+# 健康检查
+curl http://localhost:3003/health
+
+# OCR 推理测试（替换为实际图片路径）
+curl -X POST http://localhost:3003/predict \
+    -H "Content-Type: application/json" \
+    -d '{
+        "modelName": "PP-OCRv5_mobile",
+        "modelType": "ocr",
+        "options": {},
+        "text": "test"
+    }'
+```
+
+查看启动日志确认 RKNN 路径生效：
+
+```bash
+docker logs immich-ml-rknn 2>&1 | grep -E "RKNN|Loading OCR"
+# 期望看到：
+# INFO - Loading OCR RKNN model from /cache/ocr/PP-OCRv5_mobile/detection/model.rknn
+# INFO - First OCR RKNN inference ok: model=model.rknn, input_shape=(1, 3, 480, 480), ...
+```
+
+### 7.9 常见构建问题
+
+#### Q1: `uv sync` 失败，提示找不到 `rknn-toolkit-lite2`
+
+```
+error: Package `rknn-toolkit-lite2` not found
+```
+
+**原因**：构建机器不是 aarch64 架构。
+**解决**：必须在 ARM64 主机（如 RK3588 本机）构建，或使用 `qemu-user-static` 进行交叉构建（性能较差，不推荐）。
+
+#### Q2: 构建过程中 `ADD librknnrt.so` 失败
+
+```
+failed to compute cache key: failed to download librknnrt.so
+```
+
+**原因**：网络无法访问 Rockchip 官方下载地址。
+**解决**：手动下载 `librknnrt.so` 放到 `machine-learning/` 目录，把 Dockerfile 中的 `ADD` 行改为 `COPY librknnrt.so /usr/lib/`。
+
+#### Q3: 容器启动报 `failed to open rknpu module`
+
+```
+E RKNN: failed to open rknpu module, need to insmod rknpu dirver!
+RuntimeError: Failed to initialize RKNN runtime environment
+```
+
+**原因**：宿主机 `rknpu` 内核模块未加载。
+**解决**：在宿主机执行 `sudo modprobe rknpu`，或检查内核是否编译了 RKNPU 驱动。
+
