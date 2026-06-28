@@ -2,6 +2,80 @@
 
 - CLIP embeddings
 - Facial recognition
+- OCR (CPU + RKNN NPU)
+
+## RK3588 OCR 适配（RKNN NPU + CPU 双路径）
+
+### 环境初始化
+
+```bash
+# 系统依赖
+sudo apt install build-essential python3-dev -y
+
+# Python 环境（必须 3.12，rknn-toolkit-lite2 不支持 3.13）
+uv sync --python 3.12 --extra rknn
+```
+
+### 1. 转换 ONNX → RKNN 模型
+
+rknn-toolkit2（完整版）与项目 numpy>=2.4.0 冲突，需在隔离环境运行：
+
+```bash
+uv run --with 'rknn-toolkit2>=2.3.0,<3' --with 'numpy<2' --python 3.12 \
+    scripts/convert_ocr_rknn.py --output-dir /tmp/ocr-rknn
+```
+
+转换后生成 `ppocrv4_det.rknn` 和 `ppocrv4_rec.rknn`。
+将它们复制到模型缓存目录并重命名为 `model.rknn`（det/rec 分别存于不同子目录）：
+
+```bash
+CACHE_DIR=~/.cache/immich_ml/ocr/PP-OCRv5_mobile
+mkdir -p "$CACHE_DIR/detection" "$CACHE_DIR/recognition"
+cp /tmp/ocr-rknn/ppocrv4_det.rknn "$CACHE_DIR/detection/model.rknn"
+cp /tmp/ocr-rknn/ppocrv4_rec.rknn "$CACHE_DIR/recognition/model.rknn"
+# 字符表 (ppocr_keys_v1.txt) 会在首次加载识别模型时自动下载
+```
+
+### 2. 运行 OCR
+
+#### CPU (ONNX) 模式
+
+```bash
+MACHINE_LEARNING_RKNN=false uv run --python 3.12 scripts/test_ocr.py --image test.png
+```
+
+#### RKNN (NPU) 模式
+
+```bash
+uv run --python 3.12 --extra rknn scripts/test_ocr.py --image test.png
+```
+
+不传 `--image` 则自动生成测试图片。
+
+### 3. 启动服务
+
+```bash
+# CPU 模式
+MACHINE_LEARNING_RKNN=false uv run --python 3.12 gunicorn immich_ml.main:app
+
+# RKNN 模式
+uv run --python 3.12 --extra rknn gunicorn immich_ml.main:app
+```
+
+### 架构说明
+
+| 组件 | 文件 | 说明 |
+|------|------|------|
+| RknnOcrSession | `immich_ml/sessions/rknn/ocr.py` | OCR 专用 RKNN session（单实例，非线程池） |
+| TextDetector | `immich_ml/models/ocr/detection.py` | 检测模型，按 model_format 走 ONNX 或 RKNN |
+| TextRecognizer | `immich_ml/models/ocr/recognition.py` | 识别模型，RKNN 路径绕过 RapidTextRecognizer |
+| 转换脚本 | `scripts/convert_ocr_rknn.py` | ONNX→RKNN 转换（独立环境运行） |
+| 测试脚本 | `scripts/test_ocr.py` | 端到端 OCR 测试 |
+
+模型格式由 `MACHINE_LEARNING_RKNN` 环境变量控制：
+- `true`（默认）: RK3588 上自动使用 RKNN
+- `false`: 强制使用 CPU/ONNX
+
 
 # Setup
 
